@@ -21,19 +21,19 @@ let server: http.Server;
 let baseUrl: string;
 let hits: Record<string, number>;
 let acceptHeaders: Record<string, string | undefined>;
-let routes: Record<string, Responder>;
+let routes: Map<string, Responder>;
 let workDir: string;
 
 beforeEach(async () => {
   hits = {};
   acceptHeaders = {};
-  routes = {};
+  routes = new Map();
   workDir = fs.mkdtempSync(path.join(os.tmpdir(), "bullfrog-download-"));
   server = http.createServer((req, res) => {
     const route = req.url ?? "";
     hits[route] = (hits[route] ?? 0) + 1;
     acceptHeaders[route] = req.headers.accept;
-    const responder = routes[route];
+    const responder = routes.get(route);
     if (!responder) {
       res.writeHead(404).end("not found");
       return;
@@ -92,8 +92,9 @@ const fail =
 
 describe("download_verified", () => {
   it("retries HTTP errors on the primary route until it serves the verified tarball", async () => {
-    routes["/primary"] = (req, res, hit) =>
-      hit <= 3 ? fail(504)(req, res, hit) : serve(PAYLOAD)(req, res, hit);
+    routes.set("/primary", (req, res, hit) =>
+      hit <= 3 ? fail(504)(req, res, hit) : serve(PAYLOAD)(req, res, hit),
+    );
 
     const { status, file } = await runDownload(CHECKSUM, [
       `${baseUrl}/primary`,
@@ -105,8 +106,8 @@ describe("download_verified", () => {
   });
 
   it("falls back to the API asset route, with the octet-stream Accept header, while the primary returns 504", async () => {
-    routes["/primary"] = fail(504);
-    routes["/api-asset"] = serve(PAYLOAD);
+    routes.set("/primary", fail(504));
+    routes.set("/api-asset", serve(PAYLOAD));
 
     const { status, file } = await runDownload(CHECKSUM, [
       `${baseUrl}/primary`,
@@ -119,10 +120,11 @@ describe("download_verified", () => {
   });
 
   it("discards a checksum mismatch and re-downloads instead of accepting it", async () => {
-    routes["/primary"] = (req, res, hit) =>
+    routes.set("/primary", (req, res, hit) =>
       hit === 1
         ? serve(Buffer.from("truncated or tampered"))(req, res, hit)
-        : serve(PAYLOAD)(req, res, hit);
+        : serve(PAYLOAD)(req, res, hit),
+    );
 
     const { status, output, file } = await runDownload(CHECKSUM, [
       `${baseUrl}/primary`,
@@ -135,8 +137,8 @@ describe("download_verified", () => {
   });
 
   it("fails closed, leaving no file, when no attempt ever matches the pinned checksum", async () => {
-    routes["/primary"] = serve(Buffer.from("wrong bytes, HTTP 200"));
-    routes["/api-asset"] = fail(503);
+    routes.set("/primary", serve(Buffer.from("wrong bytes, HTTP 200")));
+    routes.set("/api-asset", fail(503));
 
     const { status, file } = await runDownload(
       CHECKSUM,
@@ -150,7 +152,7 @@ describe("download_verified", () => {
   });
 
   it("refuses to run without a checksum", async () => {
-    routes["/primary"] = serve(PAYLOAD);
+    routes.set("/primary", serve(PAYLOAD));
 
     const { status } = await runDownload("", [`${baseUrl}/primary`]);
 
