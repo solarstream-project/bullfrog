@@ -34,7 +34,7 @@ beforeEach(async () => {
     hits[route] = (hits[route] ?? 0) + 1;
     acceptHeaders[route] = req.headers.accept;
     const responder = routes.get(route);
-    if (!responder) {
+    if (!routes.has(route) || typeof responder !== "function") {
       res.writeHead(404).end("not found");
       return;
     }
