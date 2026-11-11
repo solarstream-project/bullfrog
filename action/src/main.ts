@@ -10,6 +10,7 @@ import {
 } from "./constants";
 import { parseInputs, EgressPolicy, DnsPolicy } from "./inputs";
 import { waitForFile, getGitHubContext } from "./util";
+import { ensureRuntimeDependencies, RuntimeDependencies } from "./packages";
 import {
   fetchPolicyOverride,
   applyPolicyOverride,
@@ -32,18 +33,31 @@ async function downloadAgent(actionDirectory: string): Promise<void> {
   }
 }
 
-function installPackages(): void {
+function installPackages(actionDirectory: string): RuntimeDependencies {
   console.log("Installing packages");
 
-  const { status } = spawnSync(
-    "sudo",
-    ["apt-get", "install", "-y", "libnetfilter-queue-dev", "nftables"],
-    { stdio: "inherit" },
-  );
-
-  if (status !== 0) {
-    throw new Error("Couldn't install packages");
-  }
+  return ensureRuntimeDependencies({
+    arch: process.arch,
+    vendorDirectory: path.join(actionDirectory, "vendor"),
+    log: (message) => console.log(message),
+    sleep: (ms) => {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+    },
+    run: (command, args, options) => {
+      // stdout is captured for the caller and echoed, stderr goes to the log.
+      const { status, stdout } = spawnSync(command, args, {
+        stdio: ["ignore", "pipe", "inherit"],
+        encoding: "utf8",
+        timeout: options?.timeoutMs,
+        killSignal: "SIGKILL",
+      });
+      // ldconfig -p lists every library on the image; do not echo that.
+      if (stdout && !command.endsWith("ldconfig")) {
+        process.stdout.write(stdout);
+      }
+      return { status, stdout: stdout ?? "" };
+    },
+  });
 }
 
 async function startAgent({
@@ -54,6 +68,7 @@ async function startAgent({
   egressPolicy,
   enableSudo,
   collectProcessInfo,
+  libraryPath,
 }: {
   allowedDomains: string[];
   allowedIps: string[];
@@ -62,6 +77,7 @@ async function startAgent({
   egressPolicy: EgressPolicy;
   enableSudo: boolean;
   collectProcessInfo: boolean;
+  libraryPath?: string;
 }): Promise<void> {
   // fix buggy /etc/hosts entry in Github private repo runners
   // this misconfiguration causes the agent to fail to start
@@ -86,6 +102,8 @@ async function startAgent({
   const collectProcessInfoFlag = collectProcessInfo ? "true" : "false";
 
   const agentCommand = [
+    // Set inside the sudo shell: sudo drops LD_LIBRARY_PATH from its caller.
+    ...(libraryPath ? [`LD_LIBRARY_PATH=${libraryPath}`] : []),
     AGENT_INSTALL_PATH,
     "--dns-policy",
     dnsPolicy,
@@ -181,7 +199,7 @@ async function main(): Promise<void> {
 
   const agentLogFilepath = path.join(logDirectory, AGENT_LOG_FILENAME);
 
-  installPackages();
+  const { libraryPath } = installPackages(actionDirectory);
 
   await downloadAgent(actionDirectory);
 
@@ -193,6 +211,7 @@ async function main(): Promise<void> {
     enableSudo,
     collectProcessInfo,
     egressPolicy,
+    libraryPath,
   });
 }
 
